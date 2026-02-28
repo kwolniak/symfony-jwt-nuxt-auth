@@ -7,4 +7,8 @@ nelmio_cors:
         expose_headers: ['Link']
         max_age: 3600
     paths:
-        '^/': null
+#        '^/': null
+        '^/api/':
+            allow_credentials: true
+        '^/connect/':
+            allow_credentials: false
