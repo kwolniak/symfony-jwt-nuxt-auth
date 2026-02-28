@@ -28,7 +28,8 @@ Browser → Nuxt (`/api/auth/google`) → Symfony (`/connect/google`) → Google
 - One-time authorization codes prevent JWT leakage via browser history/referrer headers
 - Same cookie structure for both login methods — all downstream auth logic is provider-agnostic
 - OAuth is delegated to Symfony (not Nuxt) because Symfony owns the user database and auth authority
-- Route protection is opt-out: all routes are protected by default; add paths to `publicRoutes` in `middleware/auth.global.ts` to make them public; alternatively use `definePageMeta({ auth: false })` per page
+- Route protection is opt-out: all routes are protected by default; add paths to `publicRoutes` in `middleware/auth.global.ts` to make them public
+- Guest-only pages (e.g. login): use named middleware `middleware/guest.ts` + `definePageMeta({ middleware: ['guest'] })` on the page — redirects authenticated users to `/dashboard`; global middleware always runs first so `user` state is already populated, no extra `fetchUser()` needed
 - Token refresh is fully server-side and transparent: proxy retries on 401, client never handles expiry
 
 ## Token Refresh
