@@ -4,6 +4,7 @@ namespace App\Controller;
 
 use App\Entity\User;
 use Doctrine\ORM\EntityManagerInterface;
+use Gesdinet\JWTRefreshTokenBundle\Generator\RefreshTokenGeneratorInterface;
 use KnpU\OAuth2ClientBundle\Client\ClientRegistry;
 use Lexik\Bundle\JWTAuthenticationBundle\Services\JWTTokenManagerInterface;
 use Psr\Cache\CacheItemPoolInterface;
@@ -18,6 +19,9 @@ class GoogleController extends AbstractController
 {
     public function __construct(
         private CacheItemPoolInterface $oauthCodesCache,
+        private RefreshTokenGeneratorInterface $refreshTokenGenerator,
+        #[Autowire(param: 'gesdinet_jwt_refresh_token.ttl')]
+        private int $refreshTokenTtl,
         #[Autowire(env: 'NUXT_URL')]
         private string $nuxtUrl,
     ) {}
@@ -37,7 +41,7 @@ class GoogleController extends AbstractController
         EntityManagerInterface $em,
         JWTTokenManagerInterface $jwtManager,
     ): RedirectResponse {
-        $client     = $clientRegistry->getClient('google');
+        $client = $clientRegistry->getClient('google');
         $googleUser = $client->fetchUser();
 
         $user = $em->getRepository(User::class)
@@ -56,11 +60,15 @@ class GoogleController extends AbstractController
         }
 
         $jwt = $jwtManager->create($user);
+        $refreshToken = $this->refreshTokenGenerator->createForUserWithTtl($user, $this->refreshTokenTtl);
 
-        // Store JWT in Redis with a 60-second TTL — one-time code pattern
+        // Store both tokens in Redis with a 60-second TTL — one-time code pattern
         $code = bin2hex(random_bytes(32));
         $item = $this->oauthCodesCache->getItem("oauth_code_{$code}");
-        $item->set($jwt)->expiresAfter(60);
+        $item->set([
+            'token' => $jwt,
+            'refresh_token' => $refreshToken->getRefreshToken(),
+        ])->expiresAfter(60);
         $this->oauthCodesCache->save($item);
 
         return new RedirectResponse($this->nuxtUrl . '/api/auth/google/callback?code=' . $code);
@@ -79,9 +87,12 @@ class GoogleController extends AbstractController
             return new JsonResponse(['error' => 'Invalid or expired code'], 401);
         }
 
-        $jwt = $item->get();
+        $data = $item->get();
         $this->oauthCodesCache->deleteItem("oauth_code_{$code}"); // one-time use
 
-        return new JsonResponse(['token' => $jwt]);
+        return new JsonResponse([
+            'token' => $data['token'],
+            'refresh_token' => $data['refresh_token'],
+        ]);
     }
 }
