@@ -5,16 +5,47 @@ security:
 
     # https://symfony.com/doc/current/security.html#loading-the-user-the-user-provider
     providers:
-        users_in_memory: { memory: null }
+        app_user_provider:
+            entity:
+                class: App\Entity\User
+                property: email
 
     firewalls:
         dev:
             # Ensure dev tools and static assets are always allowed
             pattern: ^/(_profiler|_wdt|assets|build)/
             security: false
-        main:
-            lazy: true
-            provider: users_in_memory
+
+        # Public login + refresh endpoints — no auth required
+        login:
+            pattern: ^/api/login_check
+            stateless: true
+            json_login:
+                check_path: /api/login_check
+                success_handler: lexik_jwt_authentication.handler.authentication_success
+                failure_handler: lexik_jwt_authentication.handler.authentication_failure
+
+        refresh:
+            pattern: ^/api/token/refresh
+            stateless: true
+            refresh_jwt:
+                check_path: /api/token/refresh
+
+        # Google OAuth routes — publicly accessible
+        oauth:
+            pattern: ^/connect/
+            security: false
+
+        # Code exchange endpoint — no JWT required (it IS the exchange)
+        exchange:
+            pattern: ^/api/auth/exchange-code
+            stateless: true
+
+        # All other /api/* routes require a valid JWT
+        api:
+            pattern: ^/api/
+            stateless: true
+            jwt: ~
 
             # Activate different ways to authenticate:
             # https://symfony.com/doc/current/security.html#the-firewall
@@ -26,6 +57,11 @@ security:
     access_control:
         # - { path: ^/admin, roles: ROLE_ADMIN }
         # - { path: ^/profile, roles: ROLE_USER }
+        - { path: ^/api/login_check, roles: PUBLIC_ACCESS }
+        - { path: ^/api/token/refresh, roles: PUBLIC_ACCESS }
+        - { path: ^/api/auth/exchange-code, roles: PUBLIC_ACCESS }
+        - { path: ^/connect/, roles: PUBLIC_ACCESS }
+        - { path: ^/api/, roles: ROLE_USER }
 
 when@test:
     security:

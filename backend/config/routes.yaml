@@ -9,3 +9,11 @@
 
 controllers:
     resource: routing.controllers
+
+# Stub route required by Symfony 6+ routing-before-firewall order.
+# RouterListener (priority 32) runs before the Firewall (priority 8), so
+# the path must exist in the router or it throws 404 before json_login runs.
+# The security firewall intercepts the request — no controller is needed.
+api_login_check:
+    path: /api/login_check
+    methods: [POST]
