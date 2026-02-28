@@ -77,6 +77,8 @@ services:
     image: node:22-alpine
     container_name: sfl_node
     working_dir: /app/frontend
+    ports:
+      - "127.0.0.1:3000:3000"
     command:
       - sh
       - -c
