@@ -6,6 +6,8 @@ export default defineNuxtConfig({
   runtimeConfig: {
     // Server-only (not exposed to the browser)
     apiBaseUrl: process.env.NUXT_API_BASE_URL ?? 'http://nginx',
+    // Separate from apiBaseUrl: Google rejects .test TLDs, so OAuth redirects use localhost.
+    oauthBaseUrl: process.env.NUXT_OAUTH_BASE_URL ?? 'http://localhost',
 
     // Exposed to a client via useRuntimeConfig().public.*
     public: {

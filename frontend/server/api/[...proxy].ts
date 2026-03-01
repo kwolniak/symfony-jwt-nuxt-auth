@@ -1,5 +1,20 @@
 import { FetchError } from 'ofetch';
 
+const refreshLocks = new Map<string, Promise<{ token: string; refresh_token?: string }>>();
+
+function doRefresh(apiBaseUrl: string, refreshToken: string) {
+  const existing = refreshLocks.get(refreshToken);
+  if (existing) return existing;
+
+  const promise = $fetch<{ token: string; refresh_token?: string }>(
+    `${apiBaseUrl}/api/token/refresh`,
+    { method: 'POST', body: { refresh_token: refreshToken } },
+  ).finally(() => refreshLocks.delete(refreshToken));
+
+  refreshLocks.set(refreshToken, promise);
+  return promise;
+}
+
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig();
   const jwt = getCookie(event, 'jwt');
@@ -16,7 +31,7 @@ export default defineEventHandler(async (event) => {
       method,
       headers: {
         ...(token && { Authorization: `Bearer ${token}` }),
-        'Content-Type': 'application/json',
+        ...(hasBody && { 'Content-Type': 'application/json' }),
       },
       query,
       body,
@@ -30,18 +45,17 @@ export default defineEventHandler(async (event) => {
       if (!refreshToken) throw createError({ statusCode: 401, data: err.data });
 
       try {
-        const refreshed = await $fetch<{ token: string; refresh_token?: string }>(
-          `${config.apiBaseUrl}/api/token/refresh`,
-          { method: 'POST', body: { refresh_token: refreshToken } },
-        );
+        const refreshed = await doRefresh(config.apiBaseUrl, refreshToken);
 
         setCookie(event, 'jwt', refreshed.token, {
-          httpOnly: true, secure: false, sameSite: 'lax', maxAge: 60 * 60, path: '/',
+          ...jwtCookieOptions(),
+          maxAge: 60 * 60,
         });
 
         if (refreshed.refresh_token) {
           setCookie(event, 'jwt_refresh', refreshed.refresh_token, {
-            httpOnly: true, secure: false, sameSite: 'lax', maxAge: 60 * 60 * 24 * 30, path: '/',
+            ...jwtCookieOptions(),
+            maxAge: 60 * 60 * 24 * 30,
           });
         }
 

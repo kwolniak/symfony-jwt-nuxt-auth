@@ -27,9 +27,12 @@ export const useAuth = () => {
   };
 
   const logout = async () => {
-    await $fetch('/api/auth/logout', { method: 'POST' });
-    user.value = null;
-    await navigateTo('/login');
+    try {
+      await $fetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      user.value = null;
+      await navigateTo('/login');
+    }
   };
 
   return { user, login, logout, fetchUser };

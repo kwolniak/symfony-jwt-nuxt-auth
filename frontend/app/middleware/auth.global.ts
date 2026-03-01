@@ -1,8 +1,10 @@
 export default defineNuxtRouteMiddleware(async (to) => {
   const { user, fetchUser } = useAuth();
+  const initialized = useState<boolean>('auth_initialized', () => false);
 
-  if (!user.value) {
+  if (!initialized.value) {
     await fetchUser();
+    initialized.value = true;
   }
 
   const publicRoutes = ['/login'];

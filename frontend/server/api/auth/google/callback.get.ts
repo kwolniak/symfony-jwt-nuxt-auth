@@ -13,25 +13,20 @@ export default defineEventHandler(async (event) => {
     );
 
     setCookie(event, 'jwt', response.token, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
+      ...jwtCookieOptions(),
       maxAge: 60 * 60,
-      path: '/',
     });
 
     if (response.refresh_token) {
       setCookie(event, 'jwt_refresh', response.refresh_token, {
-        httpOnly: true,
-        secure: false,
-        sameSite: 'lax',
+        ...jwtCookieOptions(),
         maxAge: 60 * 60 * 24 * 30,
-        path: '/',
       });
     }
 
     return sendRedirect(event, '/dashboard');
-  } catch {
+  } catch (err) {
+    console.error('[OAuth callback] Code exchange failed:', err);
     return sendRedirect(event, '/login?error=oauth_failed');
   }
 });

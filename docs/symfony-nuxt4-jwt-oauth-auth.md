@@ -25,34 +25,44 @@ Nuxt 4 (built on Nitro + Vue 3) doesn't have a de facto auth module like Nuxt 2 
 
 #### 1. Store tokens in HTTP-only cookies (secure approach)
 
-Don't store JWTs in `localStorage` — it's XSS-vulnerable. Instead, create a **Nitro server route** that proxies the login and sets an HTTP-only cookie:
+Don't store JWTs in `localStorage` — it's XSS-vulnerable. Instead, create a **Nitro server route** that proxies the login and sets an HTTP-only cookie.
+
+First, centralize cookie options in a shared utility so every handler stays consistent:
+
+```ts
+// server/utils/cookie.ts
+export const jwtCookieOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'lax' as const,
+  path: '/',
+});
+```
+
+Nitro auto-imports everything from `server/utils/`, so no explicit import is needed.
+
+Then the login route destructures only the expected fields before forwarding — never pass the raw client body to Symfony:
 
 ```ts
 // server/api/auth/login.post.ts
 export default defineEventHandler(async (event) => {
-  const body = await readBody(event);
+  const config = useRuntimeConfig();
+  const { username, password } = await readBody(event);
 
-  const response = await $fetch('https://your-api.com/api/login_check', {
-    method: 'POST',
-    body,
-  });
+  const response = await $fetch<{ token: string; refresh_token?: string }>(
+    `${config.apiBaseUrl}/api/login_check`,
+    { method: 'POST', body: { username, password } },
+  );
 
-  // Set HTTP-only cookie — JS can't read it, but it's sent with every request
   setCookie(event, 'jwt', response.token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'lax',
-    maxAge: 60 * 60, // match your token TTL
-    path: '/',
+    ...jwtCookieOptions(),
+    maxAge: 60 * 60,
   });
 
   if (response.refresh_token) {
     setCookie(event, 'jwt_refresh', response.refresh_token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'lax',
+      ...jwtCookieOptions(),
       maxAge: 60 * 60 * 24 * 30,
-      path: '/',
     });
   }
 
@@ -64,11 +74,29 @@ export default defineEventHandler(async (event) => {
 
 The proxy attaches the JWT to every Symfony request. On 401, it automatically attempts to refresh the token using `jwt_refresh` cookie and retries the original request — transparent to the caller.
 
-`readBody` is read before the first fetch because the request body is a stream that can only be consumed once; the cached value is reused on retry.
+Key implementation details:
+- `readBody` is read before the first fetch because the request body is a stream that can only be consumed once; the cached value is reused on retry.
+- `Content-Type: application/json` is only sent when there is a body — some strict backends reject it on GET/DELETE requests.
+- A module-level `refreshLocks` Map deduplicates concurrent refresh attempts. If two parallel requests both get 401, only one actual refresh call is made; the second awaits the same Promise. This prevents a race condition where `gesdinet` rotates the refresh token on first use, causing the second concurrent refresh to fail.
 
 ```ts
 // server/api/[...proxy].ts
 import { FetchError } from 'ofetch';
+
+const refreshLocks = new Map<string, Promise<{ token: string; refresh_token?: string }>>();
+
+function doRefresh(apiBaseUrl: string, refreshToken: string) {
+  const existing = refreshLocks.get(refreshToken);
+  if (existing) return existing;
+
+  const promise = $fetch<{ token: string; refresh_token?: string }>(
+    `${apiBaseUrl}/api/token/refresh`,
+    { method: 'POST', body: { refresh_token: refreshToken } },
+  ).finally(() => refreshLocks.delete(refreshToken));
+
+  refreshLocks.set(refreshToken, promise);
+  return promise;
+}
 
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig();
@@ -77,16 +105,16 @@ export default defineEventHandler(async (event) => {
   const path = getRouterParam(event, 'proxy');
   const query = getQuery(event);
 
-  const method = event.method as string;
+  const method = event.method;
   const hasBody = ['POST', 'PUT', 'PATCH'].includes(method);
   const body = hasBody ? await readBody(event) : undefined;
 
-  const makeRequest = (token: string | undefined) =>
+  const makeRequest = (token: string | undefined): Promise<unknown> =>
     $fetch(`${config.apiBaseUrl}/api/${path}`, {
       method,
       headers: {
         ...(token && { Authorization: `Bearer ${token}` }),
-        'Content-Type': 'application/json',
+        ...(hasBody && { 'Content-Type': 'application/json' }),
       },
       query,
       body,
@@ -100,18 +128,17 @@ export default defineEventHandler(async (event) => {
       if (!refreshToken) throw createError({ statusCode: 401, data: err.data });
 
       try {
-        const refreshed = await $fetch<{ token: string; refresh_token?: string }>(
-          `${config.apiBaseUrl}/api/token/refresh`,
-          { method: 'POST', body: { refresh_token: refreshToken } },
-        );
+        const refreshed = await doRefresh(config.apiBaseUrl, refreshToken);
 
         setCookie(event, 'jwt', refreshed.token, {
-          httpOnly: true, secure: false, sameSite: 'lax', maxAge: 60 * 60, path: '/',
+          ...jwtCookieOptions(),
+          maxAge: 60 * 60,
         });
 
         if (refreshed.refresh_token) {
           setCookie(event, 'jwt_refresh', refreshed.refresh_token, {
-            httpOnly: true, secure: false, sameSite: 'lax', maxAge: 60 * 60 * 24 * 30, path: '/',
+            ...jwtCookieOptions(),
+            maxAge: 60 * 60 * 24 * 30,
           });
         }
 
@@ -135,8 +162,27 @@ This way your frontend never sees or handles the raw JWT, and sessions are autom
 
 ```ts
 // composables/useAuth.ts
+interface User {
+  id: string;
+  email: string;
+  name: string | null;
+  roles: string[];
+}
+
 export const useAuth = () => {
   const user = useState<User | null>('auth_user', () => null);
+
+  const fetchUser = async () => {
+    try {
+      // useRequestHeaders forwards browser cookies to internal Nitro $fetch during SSR.
+      // Without this, the proxy can't read the jwt cookie server-side → Symfony 401 → redirect loop.
+      user.value = await $fetch<User>('/api/me', {
+        headers: useRequestHeaders(['cookie']),
+      });
+    } catch {
+      user.value = null;
+    }
+  };
 
   const login = async (email: string, password: string) => {
     await $fetch('/api/auth/login', {
@@ -146,27 +192,20 @@ export const useAuth = () => {
     await fetchUser();
   };
 
-  const fetchUser = async () => {
-    try {
-      // useRequestHeaders forwards browser cookies to internal Nitro $fetch during SSR.
-      // Without this, the proxy can't read the jwt cookie server-side → Symfony 401 → redirect loop.
-      user.value = await $fetch('/api/me', {
-        headers: useRequestHeaders(['cookie']),
-      });
-    } catch {
-      user.value = null;
-    }
-  };
-
   const logout = async () => {
-    await $fetch('/api/auth/logout', { method: 'POST' });
-    user.value = null;
-    navigateTo('/login');
+    try {
+      await $fetch('/api/auth/logout', { method: 'POST' });
+    } finally {
+      user.value = null;
+      await navigateTo('/login');
+    }
   };
 
   return { user, login, logout, fetchUser };
 };
 ```
+
+The `logout` uses `try/finally` so the user is always redirected and state is cleared, even if the server call fails (e.g. network error).
 
 #### 4. Auth middleware
 
@@ -174,17 +213,21 @@ export const useAuth = () => {
 // middleware/auth.global.ts
 export default defineNuxtRouteMiddleware(async (to) => {
   const { user, fetchUser } = useAuth();
+  const initialized = useState<boolean>('auth_initialized', () => false);
 
-  if (!user.value) {
+  if (!initialized.value) {
     await fetchUser();
+    initialized.value = true;
   }
 
-  const publicRoutes = ['/login', '/register'];
+  const publicRoutes = ['/login'];
   if (!user.value && !publicRoutes.includes(to.path)) {
     return navigateTo('/login');
   }
 });
 ```
+
+The `auth_initialized` flag ensures `fetchUser()` runs exactly once per SSR/client lifecycle — without it, unauthenticated users trigger a server round-trip on every route navigation.
 
 **Model dostępu:** domyślna ochrona (opt-out) — każda strona wymaga zalogowania, chyba że jest jawnie wymieniona w `publicRoutes`. Aby dodać publiczną stronę, wystarczy dopisać jej ścieżkę do tablicy.
 
@@ -206,29 +249,9 @@ export default defineNuxtRouteMiddleware(async (to) => {
 });
 ```
 
-#### 5. Token refresh (server route)
+#### 5. Token refresh
 
-```ts
-// server/api/auth/refresh.post.ts
-export default defineEventHandler(async (event) => {
-  const refreshToken = getCookie(event, 'jwt_refresh');
-  if (!refreshToken) throw createError({ statusCode: 401 });
-
-  const response = await $fetch('https://your-api.com/api/token/refresh', {
-    method: 'POST',
-    body: { refresh_token: refreshToken },
-  });
-
-  setCookie(event, 'jwt', response.token, {
-    httpOnly: true, secure: true, sameSite: 'lax',
-    maxAge: 60 * 60, path: '/',
-  });
-
-  return { success: true };
-});
-```
-
-This endpoint exists as a manual escape hatch (e.g. explicit "extend session" button). Automatic refresh on expired JWT is handled transparently by the proxy — see section 2 above.
+Token refresh is handled entirely inside the proxy (section 2 above) — there is no separate `/api/auth/refresh` route. The proxy's `doRefresh` function handles everything transparently, including deduplication of concurrent refresh attempts via the `refreshLocks` Map. No client-side code is needed.
 
 ### Why this pattern?
 
@@ -374,54 +397,54 @@ The one-time code pattern avoids putting raw tokens in a URL that could leak thr
 ```ts
 // server/api/auth/google.get.ts
 export default defineEventHandler((event) => {
-  // Just redirect the browser to Symfony's OAuth start
-  return sendRedirect(event, 'https://your-api.com/connect/google');
+  const config = useRuntimeConfig();
+  // oauthBaseUrl must be http://localhost (not sfl-api.test) because Google rejects .test TLDs.
+  // Nginx routes unmatched server_name requests to the first vhost (Symfony).
+  return sendRedirect(event, `${config.oauthBaseUrl}/connect/google`, 302);
 });
 ```
+
+The `oauthBaseUrl` is a separate server-only runtime config key (`NUXT_OAUTH_BASE_URL`, defaults to `http://localhost`), distinct from `apiBaseUrl`, because Google rejects `.test` TLD redirect URIs.
 
 #### Handle the callback
 
 ```ts
 // server/api/auth/google/callback.get.ts
 export default defineEventHandler(async (event) => {
+  const config = useRuntimeConfig();
   const { code } = getQuery(event);
 
-  if (!code) {
+  if (!code || typeof code !== 'string') {
     return sendRedirect(event, '/login?error=missing_code');
   }
 
   try {
-    // Exchange the one-time code for JWT + refresh token
     const response = await $fetch<{ token: string; refresh_token?: string }>(
-      'https://your-api.com/api/auth/exchange-code',
+      `${config.apiBaseUrl}/api/auth/exchange-code`,
       { method: 'POST', body: { code } },
     );
 
-    // Set the same HTTP-only cookies as regular login
     setCookie(event, 'jwt', response.token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'lax',
+      ...jwtCookieOptions(),
       maxAge: 60 * 60,
-      path: '/',
     });
 
     if (response.refresh_token) {
       setCookie(event, 'jwt_refresh', response.refresh_token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'lax',
+        ...jwtCookieOptions(),
         maxAge: 60 * 60 * 24 * 30,
-        path: '/',
       });
     }
 
     return sendRedirect(event, '/dashboard');
-  } catch {
+  } catch (err) {
+    console.error('[OAuth callback] Code exchange failed:', err);
     return sendRedirect(event, '/login?error=oauth_failed');
   }
 });
 ```
+
+Note the `catch (err)` — always log OAuth errors server-side before redirecting. A bare `catch {}` makes debugging production OAuth issues nearly impossible.
 
 #### Login page button
 

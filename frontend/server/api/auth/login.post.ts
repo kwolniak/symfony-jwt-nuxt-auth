@@ -1,27 +1,21 @@
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig();
-  const body = await readBody(event);
+  const { username, password } = await readBody(event);
 
   const response = await $fetch<{ token: string; refresh_token?: string }>(
     `${config.apiBaseUrl}/api/login_check`,
-    { method: 'POST', body },
+    { method: 'POST', body: { username, password } },
   );
 
   setCookie(event, 'jwt', response.token, {
-    httpOnly: true,
-    secure: false,
-    sameSite: 'lax',
+    ...jwtCookieOptions(),
     maxAge: 60 * 60,
-    path: '/',
   });
 
   if (response.refresh_token) {
     setCookie(event, 'jwt_refresh', response.refresh_token, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
+      ...jwtCookieOptions(),
       maxAge: 60 * 60 * 24 * 30,
-      path: '/',
     });
   }
 
