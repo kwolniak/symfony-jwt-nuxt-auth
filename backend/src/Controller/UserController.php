@@ -14,7 +14,7 @@ class UserController extends AbstractController
     public function me(#[CurrentUser] User $user): JsonResponse
     {
         return new JsonResponse([
-            'id'    => $user->getUserIdentifier(),
+            'id'    => $user->getId(),
             'email' => $user->getUserIdentifier(),
             'name'  => $user->getName(),
             'roles' => $user->getRoles(),

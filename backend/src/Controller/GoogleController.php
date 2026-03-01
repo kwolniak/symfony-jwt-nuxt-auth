@@ -42,7 +42,17 @@ class GoogleController extends AbstractController
         JWTTokenManagerInterface $jwtManager,
     ): RedirectResponse {
         $client = $clientRegistry->getClient('google');
-        $googleUser = $client->fetchUser();
+
+        try {
+            $googleUser = $client->fetchUser();
+        } catch (\Exception) {
+            return new RedirectResponse($this->nuxtUrl . '/login?error=oauth_failed');
+        }
+
+        $userData = $googleUser->toArray();
+        if (empty($userData['email_verified'])) {
+            return new RedirectResponse($this->nuxtUrl . '/login?error=email_not_verified');
+        }
 
         $user = $em->getRepository(User::class)
             ->findOneBy(['email' => $googleUser->getEmail()]);
